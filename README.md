@@ -8,5 +8,5 @@ rust写的websocket服务器demo
 
 websocket客户端
 
- https://github.com/529124368/rust_websocket_demo/blob/master/examples/clinet.rs
+ https://github.com/529124368/rust_websocket_demo/blob/master/examples/client.rs
 
