@@ -143,7 +143,7 @@ async fn user_connected(ws: WebSocket, users: Users) {
 
 async fn broadcast_message(my_id: usize, msg: Message, users: &Users) {
     // Skip any non-Text messages...
-    let msg = if let Ok(s) = msg.to_str() {
+    let msg = if let Ok(s) = std::str::from_utf8(msg.as_bytes()) {
         s
     } else {
         return;
