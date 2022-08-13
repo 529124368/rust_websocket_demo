@@ -73,7 +73,7 @@ async fn user_connected(ws: WebSocket, users: Users) {
     //登录user table
     users.write().await.insert(my_id, States::new(tx));
 
-    //
+    //往客户端发送消息
     let handle1 = tokio::task::spawn(async move {
         while let Some(message) = rx.recv().await {
             user_ws_tx
@@ -84,18 +84,20 @@ async fn user_connected(ws: WebSocket, users: Users) {
                 .await;
         }
     });
+
     let users1 = users.clone();
+    //心跳检测
     let handle2 = tokio::task::spawn(async move {
         loop {
             tokio::select! {
                  _ =async{alive_read.recv().await} => {
                     eprintln!("live");
                 },
-                _ = tokio::time::sleep(tokio::time::Duration::from_secs(30)) => {
-                    eprintln!("超过30s强制踢下线");
+                _ = tokio::time::sleep(tokio::time::Duration::from_secs(60)) => {
+                    eprintln!("超过60s强制踢下线");
                     let _=exit_send.write().await.send(true).await;
                     //广播消息
-                    broadcast_message(my_id, Message::text(format!("<User#{}>:被踢下线了", my_id)),&users).await;
+                    broadcast_message(my_id, Message::text(format!("User#{}:被踢下线了", my_id)),&users).await;
                     user_disconnected(my_id, &users,&alive_send).await;
                     return;
                 },
@@ -103,8 +105,10 @@ async fn user_connected(ws: WebSocket, users: Users) {
         }
     });
 
+    //接受客户端消息
     let handle = tokio::task::spawn(async move {
         while let Some(result) = user_ws_rx.next().await {
+            //心跳监测
             alive_send1
                 .write()
                 .await
@@ -134,7 +138,6 @@ async fn user_connected(ws: WebSocket, users: Users) {
         exit_read.close();
         //强制断开链接
         handle.abort();
-        //println!("{}", handle.await.unwrap_err().is_cancelled());
         handle1.abort();
         handle2.abort();
         break;
@@ -149,15 +152,18 @@ async fn broadcast_message(my_id: usize, msg: Message, users: &Users) {
         return;
     };
 
-    let new_msg = format!("<User#{}>: {}", my_id, msg);
+    //心跳检测消息跳过转发
+    if msg != "#beat_heat&" {
+        let new_msg = format!("User#{}: {}", my_id, msg);
 
-    // New message from this user, send it to everyone else (except same uid)...
-    for (&uid, tx) in users.read().await.iter() {
-        if my_id != uid {
-            if let Err(_disconnected) = tx.m1.send(Message::text(new_msg.clone())) {
-                // The tx is disconnected, our `user_disconnected` code
-                // should be happening in another task, nothing more to
-                // do here.
+        // New message from this user, send it to everyone else (except same uid)...
+        for (&uid, tx) in users.read().await.iter() {
+            if my_id != uid {
+                if let Err(_disconnected) = tx.m1.send(Message::text(new_msg.clone())) {
+                    // The tx is disconnected, our `user_disconnected` code
+                    // should be happening in another task, nothing more to
+                    // do here.
+                }
             }
         }
     }
