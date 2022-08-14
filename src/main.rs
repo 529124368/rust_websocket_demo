@@ -9,7 +9,7 @@ use futures_util::{SinkExt, StreamExt, TryFutureExt};
 use tokio::sync::{mpsc, RwLock};
 use warp::ws::{Message, WebSocket};
 use warp::Filter;
-
+mod msg_base;
 /// Our global unique user id counter.
 static NEXT_USER_ID: AtomicUsize = AtomicUsize::new(1);
 
@@ -29,15 +29,12 @@ type R = Arc<RwLock<Sender<bool>>>;
 
 #[tokio::main]
 async fn main() {
-    // Keep track of all connected users, key is usize, value
-    // is a websocket sender.
     let users = Users::default();
     // Turn our "state" into a new Filter...
     let users = warp::any().map(move || users.clone());
 
     // GET /chat -> websocket upgrade
-    let chat = warp::path("chat")
-        // The `ws()` filter will prepare Websocket handshake...
+    let routes = warp::path("chat")
         .and(warp::ws())
         .and(users)
         .map(|ws: warp::ws::Ws, users| {
@@ -46,9 +43,7 @@ async fn main() {
         });
 
     // GET / -> index html
-    let index = warp::path::end().map(|| warp::reply::html(INDEX_HTML));
-
-    let routes = index.or(chat);
+    // let index = warp::path::end().map(|| warp::reply::html(INDEX_HTML));
 
     warp::serve(routes).run(([127, 0, 0, 1], 80)).await;
 }
@@ -72,6 +67,13 @@ async fn user_connected(ws: WebSocket, users: Users) {
     let (tx, mut rx) = mpsc::unbounded_channel();
     //登录user table
     users.write().await.insert(my_id, States::new(tx));
+    let users_new = users.clone();
+    //广播上线消息
+    tokio::task::spawn(async move {
+        let msg = msg_base::MsgBase::new(0, my_id as u32, format!("玩家#{}:上线了", my_id));
+        let msg = serde_json::to_string(&msg).unwrap();
+        broadcast_message(my_id, Message::text(msg), &users_new).await;
+    });
 
     //往客户端发送消息
     let handle1 = tokio::task::spawn(async move {
@@ -91,13 +93,10 @@ async fn user_connected(ws: WebSocket, users: Users) {
         loop {
             tokio::select! {
                  _ =async{alive_read.recv().await} => {
-                    eprintln!("live");
                 },
                 _ = tokio::time::sleep(tokio::time::Duration::from_secs(60)) => {
                     eprintln!("超过60s强制踢下线");
                     let _=exit_send.write().await.send(true).await;
-                    //广播消息
-                    broadcast_message(my_id, Message::text(format!("User#{}:被踢下线了", my_id)),&users).await;
                     user_disconnected(my_id, &users,&alive_send).await;
                     return;
                 },
@@ -117,33 +116,32 @@ async fn user_connected(ws: WebSocket, users: Users) {
                     eprintln!("send error: {}", e);
                 })
                 .await;
-            println!("{}@接受消息", my_id);
-            let msg = match result {
-                Ok(msg) => msg,
+            match result {
+                Ok(msg) => {
+                    //广播消息
+                    broadcast_message(my_id, msg, &users1).await;
+                }
                 Err(e) => {
                     eprintln!("websocket error(uid={}): {}", my_id, e);
                     break;
                 }
             };
-            //广播消息
-            broadcast_message(my_id, msg, &users1).await;
         }
         let _ = exit_send1.write().await.send(true).await;
         user_disconnected(my_id, &users1, &alive_send1).await;
     });
 
     //监听消息
-    while let Some(_) = exit_read.recv().await {
-        println!("ws链接关闭");
-        exit_read.close();
+    if exit_read.recv().await.is_some() {
         //强制断开链接
+        exit_read.close();
         handle.abort();
         handle1.abort();
         handle2.abort();
-        break;
     }
 }
 
+//广播消息
 async fn broadcast_message(my_id: usize, msg: Message, users: &Users) {
     // Skip any non-Text messages...
     let msg = if let Ok(s) = std::str::from_utf8(msg.as_bytes()) {
@@ -151,19 +149,29 @@ async fn broadcast_message(my_id: usize, msg: Message, users: &Users) {
     } else {
         return;
     };
-
+    let p: msg_base::MsgBase = serde_json::from_str(msg).unwrap();
     //心跳检测消息跳过转发
-    if msg != "#beat_heat&" {
-        let new_msg = format!("User#{}: {}", my_id, msg);
+    //3 -> 心跳检测消息
+    if p.mes_type != 3 {
+        let mut new_msg = String::new();
+        if p.mes_type == 0 {
+            let msg = msg_base::MsgBase::new(0, my_id as u32, format!("系统消息:{}", p.message));
+            new_msg = serde_json::to_string(&msg).unwrap();
+        } else if p.mes_type == 1 {
+            let msg = msg_base::MsgBase::new(
+                1,
+                my_id as u32,
+                format!("玩家#{} say:{}", my_id, p.message),
+            );
+            new_msg = serde_json::to_string(&msg).unwrap();
+        } else {
+            let msg = msg_base::MsgBase::new(2, my_id as u32, p.message);
+            new_msg = serde_json::to_string(&msg).unwrap();
+        }
 
-        // New message from this user, send it to everyone else (except same uid)...
         for (&uid, tx) in users.read().await.iter() {
             if my_id != uid {
-                if let Err(_disconnected) = tx.m1.send(Message::text(new_msg.clone())) {
-                    // The tx is disconnected, our `user_disconnected` code
-                    // should be happening in another task, nothing more to
-                    // do here.
-                }
+                let _ = tx.m1.send(Message::text(new_msg.clone()));
             }
         }
     }
@@ -171,49 +179,53 @@ async fn broadcast_message(my_id: usize, msg: Message, users: &Users) {
 
 async fn user_disconnected(my_id: usize, users: &Users, r: &R) {
     eprintln!("good bye user: {}", my_id);
+    let msg = msg_base::MsgBase::new(0, my_id as u32, format!("玩家#{}:下线了", my_id));
+    let msg = serde_json::to_string(&msg).unwrap();
+    //广播消息
+    broadcast_message(my_id, Message::text(msg), users).await;
     let _ = r.read().await.clone();
     // Stream closed up, so remove from the user list
     users.write().await.remove(&my_id);
 }
 
-static INDEX_HTML: &str = r#"<!DOCTYPE html>
-<html lang="en">
-    <head>
-        <title>聊天室</title>
-    </head>
-    <body>
-        <h1>聊天室</h1>
-        <div id="chat">
-            <p><em>Connecting...</em></p>
-        </div>
-        <input type="text" id="text" />
-        <button type="button" id="send">发送消息</button>
-        <script type="text/javascript">
-        const chat = document.getElementById('chat');
-        const text = document.getElementById('text');
-        const uri = 'ws://' + location.host + '/chat';
-        const ws = new WebSocket(uri);
-        function message(data) {
-            const line = document.createElement('p');
-            line.innerText = data;
-            chat.appendChild(line);
-        }
-        ws.onopen = function() {
-            chat.innerHTML = '<p><em>Connected!</em></p>';
-        };
-        ws.onmessage = function(msg) {
-            message(msg.data);
-        };
-        ws.onclose = function() {
-            chat.getElementsByTagName('em')[0].innerText = 'Disconnected!';
-        };
-        send.onclick = function() {
-            const msg = text.value;
-            ws.send(msg);
-            text.value = '';
-            message('<You>: ' + msg);
-        };
-        </script>
-    </body>
-</html>
-"#;
+// static INDEX_HTML: &str = r#"<!DOCTYPE html>
+// <html lang="en">
+//     <head>
+//         <title>聊天室</title>
+//     </head>
+//     <body>
+//         <h1>聊天室</h1>
+//         <div id="chat">
+//             <p><em>Connecting...</em></p>
+//         </div>
+//         <input type="text" id="text" />
+//         <button type="button" id="send">发送消息</button>
+//         <script type="text/javascript">
+//         const chat = document.getElementById('chat');
+//         const text = document.getElementById('text');
+//         const uri = 'ws://' + location.host + '/chat';
+//         const ws = new WebSocket(uri);
+//         function message(data) {
+//             const line = document.createElement('p');
+//             line.innerText = data;
+//             chat.appendChild(line);
+//         }
+//         ws.onopen = function() {
+//             chat.innerHTML = '<p><em>Connected!</em></p>';
+//         };
+//         ws.onmessage = function(msg) {
+//             message(msg.data);
+//         };
+//         ws.onclose = function() {
+//             chat.getElementsByTagName('em')[0].innerText = 'Disconnected!';
+//         };
+//         send.onclick = function() {
+//             const msg = text.value;
+//             ws.send(msg);
+//             text.value = '';
+//             message('<You>: ' + msg);
+//         };
+//         </script>
+//     </body>
+// </html>
+// "#;
