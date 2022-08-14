@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Vector2 {
     pub x: f32,
     pub y: f32,
@@ -12,12 +12,13 @@ impl Vector2 {
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct MsgBase {
     pub mes_type: u8,
     pub send_id: u32,
     pub message: String,
     pub position: Vector2,
+    pub direaction: u8,
 }
 
 impl MsgBase {
@@ -27,6 +28,7 @@ impl MsgBase {
             send_id,
             message,
             position: Vector2::new(0.0, 0.0),
+            direaction: 0,
         }
     }
 }

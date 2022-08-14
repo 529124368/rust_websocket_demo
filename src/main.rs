@@ -1,3 +1,4 @@
+use msg_base::Vector2;
 use std::collections::HashMap;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
@@ -14,12 +15,18 @@ mod msg_base;
 static NEXT_USER_ID: AtomicUsize = AtomicUsize::new(1);
 
 struct States {
+    //管道
     m1: mpsc::UnboundedSender<Message>,
+    //玩家位置信息
+    position: Vector2,
 }
 
 impl States {
     fn new(m1: mpsc::UnboundedSender<Message>) -> Self {
-        Self { m1 }
+        Self {
+            m1,
+            position: Vector2 { x: 0.0, y: 0.0 },
+        }
     }
 }
 
@@ -155,7 +162,15 @@ async fn broadcast_message(my_id: usize, msg: Message, users: &Users) {
     if p.mes_type != 3 {
         let mut _new_msg = String::new();
         if p.mes_type == 0 {
-            let msg = msg_base::MsgBase::new(0, my_id as u32, format!("系统消息:{}", p.message));
+            let msg = msg_base::MsgBase::new(
+                0,
+                my_id as u32,
+                format!(
+                    "系统消息:{}\n当前在线人数为:{}",
+                    p.message,
+                    users.read().await.len()
+                ),
+            );
             _new_msg = serde_json::to_string(&msg).unwrap();
         } else if p.mes_type == 1 {
             let msg = msg_base::MsgBase::new(
@@ -165,11 +180,39 @@ async fn broadcast_message(my_id: usize, msg: Message, users: &Users) {
             );
             _new_msg = serde_json::to_string(&msg).unwrap();
         } else {
-            let mut msg = msg_base::MsgBase::new(2, my_id as u32, p.message);
-            msg.position = p.position;
-            _new_msg = serde_json::to_string(&msg).unwrap();
+            if p.message.contains("has_who") {
+                let mut name_list = "".to_string();
+                for (&uid, _) in users.read().await.iter() {
+                    if my_id != uid {
+                        name_list += &(uid.to_string() + "|");
+                    }
+                }
+                let msg =
+                    msg_base::MsgBase::new(2, my_id as u32, "has_who:".to_string() + &name_list);
+                _new_msg = serde_json::to_string(&msg).unwrap();
+                //单独发送消息 不再群发
+                users
+                    .read()
+                    .await
+                    .get(&my_id)
+                    .unwrap()
+                    .m1
+                    .send(Message::text(_new_msg))
+                    .unwrap();
+                return;
+            } else {
+                let mut msg = msg_base::MsgBase::new(2, my_id as u32, p.message);
+                msg.position = p.position;
+                msg.direaction = p.direaction;
+                _new_msg = serde_json::to_string(&msg).unwrap();
+                //更新坐标
+                let mut dd = users.write().await;
+                let d = dd.get_mut(&my_id).unwrap();
+                d.position = msg.position;
+            }
         }
 
+        //群发消息
         for (&uid, tx) in users.read().await.iter() {
             if my_id != uid {
                 let _ = tx.m1.send(Message::text(_new_msg.clone()));
@@ -178,13 +221,14 @@ async fn broadcast_message(my_id: usize, msg: Message, users: &Users) {
     }
 }
 
+//玩家下线
 async fn user_disconnected(my_id: usize, users: &Users, r: &R) {
     eprintln!("good bye user: {}", my_id);
     let msg = msg_base::MsgBase::new(0, my_id as u32, format!("玩家#{}:下线了", my_id));
     let msg = serde_json::to_string(&msg).unwrap();
-    //广播消息
-    broadcast_message(my_id, Message::text(msg), users).await;
     let _ = r.read().await.clone();
     // Stream closed up, so remove from the user list
     users.write().await.remove(&my_id);
+    //广播消息
+    broadcast_message(my_id, Message::text(msg), users).await;
 }
