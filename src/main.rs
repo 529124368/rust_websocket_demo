@@ -153,25 +153,26 @@ async fn broadcast_message(my_id: usize, msg: Message, users: &Users) {
     //心跳检测消息跳过转发
     //3 -> 心跳检测消息
     if p.mes_type != 3 {
-        let mut new_msg = String::new();
+        let mut _new_msg = String::new();
         if p.mes_type == 0 {
             let msg = msg_base::MsgBase::new(0, my_id as u32, format!("系统消息:{}", p.message));
-            new_msg = serde_json::to_string(&msg).unwrap();
+            _new_msg = serde_json::to_string(&msg).unwrap();
         } else if p.mes_type == 1 {
             let msg = msg_base::MsgBase::new(
                 1,
                 my_id as u32,
                 format!("玩家#{} say:{}", my_id, p.message),
             );
-            new_msg = serde_json::to_string(&msg).unwrap();
+            _new_msg = serde_json::to_string(&msg).unwrap();
         } else {
-            let msg = msg_base::MsgBase::new(2, my_id as u32, p.message);
-            new_msg = serde_json::to_string(&msg).unwrap();
+            let mut msg = msg_base::MsgBase::new(2, my_id as u32, p.message);
+            msg.position = p.position;
+            _new_msg = serde_json::to_string(&msg).unwrap();
         }
 
         for (&uid, tx) in users.read().await.iter() {
             if my_id != uid {
-                let _ = tx.m1.send(Message::text(new_msg.clone()));
+                let _ = tx.m1.send(Message::text(_new_msg.clone()));
             }
         }
     }
@@ -187,45 +188,3 @@ async fn user_disconnected(my_id: usize, users: &Users, r: &R) {
     // Stream closed up, so remove from the user list
     users.write().await.remove(&my_id);
 }
-
-// static INDEX_HTML: &str = r#"<!DOCTYPE html>
-// <html lang="en">
-//     <head>
-//         <title>聊天室</title>
-//     </head>
-//     <body>
-//         <h1>聊天室</h1>
-//         <div id="chat">
-//             <p><em>Connecting...</em></p>
-//         </div>
-//         <input type="text" id="text" />
-//         <button type="button" id="send">发送消息</button>
-//         <script type="text/javascript">
-//         const chat = document.getElementById('chat');
-//         const text = document.getElementById('text');
-//         const uri = 'ws://' + location.host + '/chat';
-//         const ws = new WebSocket(uri);
-//         function message(data) {
-//             const line = document.createElement('p');
-//             line.innerText = data;
-//             chat.appendChild(line);
-//         }
-//         ws.onopen = function() {
-//             chat.innerHTML = '<p><em>Connected!</em></p>';
-//         };
-//         ws.onmessage = function(msg) {
-//             message(msg.data);
-//         };
-//         ws.onclose = function() {
-//             chat.getElementsByTagName('em')[0].innerText = 'Disconnected!';
-//         };
-//         send.onclick = function() {
-//             const msg = text.value;
-//             ws.send(msg);
-//             text.value = '';
-//             message('<You>: ' + msg);
-//         };
-//         </script>
-//     </body>
-// </html>
-// "#;
