@@ -159,6 +159,7 @@ async fn broadcast_message(my_id: usize, msg: Message, users: &Users) {
     let p: msg_base::MsgBase = serde_json::from_str(msg).unwrap();
     //心跳检测消息跳过转发
     //3 -> 心跳检测消息
+    //sfsdfsd
     if p.mes_type != 3 {
         let mut _new_msg = String::new();
         if p.mes_type == 0 {
